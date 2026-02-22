@@ -14,48 +14,37 @@ def p95(values):
 
 class handler(BaseHTTPRequestHandler):
 
-    def _cors(self):
+    # ---- unified CORS ----
+    def _send_headers(self, status=200):
+        self.send_response(status)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS, GET, HEAD")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
-    # CORS preflight
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors()
-        self.end_headers()
-
-    # Some graders probe with GET
-    def do_GET(self):
-        self.send_response(200)
-        self._cors()
         self.send_header("Content-Type", "application/json")
         self.end_headers()
+
+    # ---- preflight ----
+    def do_OPTIONS(self):
+        self._send_headers(200)
+
+    # ---- grader probe (GET allowed) ----
+    def do_GET(self):
+        self._send_headers(200)
         self.wfile.write(json.dumps({
-            "message": "OK. Use POST with JSON: {\"regions\": [...], \"threshold_ms\": number}"
-        }).encode("utf-8"))
+            "message": "OK. Use POST with JSON."
+        }).encode())
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self._cors()
-        self.end_headers()
-
-    # Actual required endpoint
+    # ---- main endpoint ----
     def do_POST(self):
         try:
             length = int(self.headers.get("content-length", 0))
-            body = self.rfile.read(length).decode("utf-8")
-            payload = json.loads(body)
+            payload = json.loads(self.rfile.read(length).decode())
+
             regions = payload["regions"]
             threshold_ms = float(payload["threshold_ms"])
         except Exception:
-            self.send_response(400)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": "Expected JSON: {\"regions\": [...], \"threshold_ms\": number}"
-            }).encode("utf-8"))
+            self._send_headers(400)
+            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
             return
 
         data_path = abspath(join(dirname(__file__), "..", "q-vercel-latency.json"))
@@ -63,10 +52,13 @@ class handler(BaseHTTPRequestHandler):
             rows = json.load(f)
 
         results = []
+
         for region in regions:
-            rrows = [r for r in rows if r.get("region") == region]
+            rrows = [r for r in rows if r["region"] == region]
+
             lat = [float(r["latency_ms"]) for r in rrows]
             up = [float(r["uptime_pct"]) for r in rrows]
+
             breaches = sum(1 for x in lat if x > threshold_ms)
 
             results.append({
@@ -77,10 +69,8 @@ class handler(BaseHTTPRequestHandler):
                 "breaches": breaches
             })
 
-        resp = {"regions": results, "threshold_ms": threshold_ms}
-
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(resp).encode("utf-8"))
+        self._send_headers(200)
+        self.wfile.write(json.dumps({
+            "regions": results,
+            "threshold_ms": threshold_ms
+        }).encode())

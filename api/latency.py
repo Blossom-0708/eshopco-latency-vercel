@@ -1,67 +1,68 @@
 import json
-import os
+from http.server import BaseHTTPRequestHandler
 from statistics import mean
+from os.path import abspath, dirname, join
 
-def _p95(values):
+def p95(values):
     if not values:
         return None
     xs = sorted(values)
-    # nearest-rank style index
     k = int(0.95 * (len(xs) - 1))
     return xs[k]
 
-def _cors():
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-    }
+class handler(BaseHTTPRequestHandler):
+    def _set_cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-def handler(request):
-    # CORS preflight
-    if request.method == "OPTIONS":
-        return {"statusCode": 204, "headers": _cors(), "body": ""}
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._set_cors()
+        self.end_headers()
 
-    if request.method != "POST":
-        return {
-            "statusCode": 405,
-            "headers": {**_cors(), "Content-Type": "application/json"},
-            "body": json.dumps({"error": "Use POST"}),
-        }
+    def do_POST(self):
+        # Read JSON body
+        try:
+            length = int(self.headers.get("content-length", 0))
+            raw = self.rfile.read(length).decode("utf-8")
+            payload = json.loads(raw)
+            regions = payload["regions"]
+            threshold_ms = float(payload["threshold_ms"])
+        except Exception:
+            self.send_response(400)
+            self._set_cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "Expected JSON body: {\"regions\": [...], \"threshold_ms\": number}"
+            }).encode("utf-8"))
+            return
 
-    try:
-        payload = request.json
-        regions = payload["regions"]
-        threshold_ms = float(payload["threshold_ms"])
-    except Exception:
-        return {
-            "statusCode": 400,
-            "headers": {**_cors(), "Content-Type": "application/json"},
-            "body": json.dumps({"error": "Expected JSON body: {\"regions\": [...], \"threshold_ms\": number}"}),
-        }
+        # Load telemetry from project root
+        data_path = abspath(join(dirname(__file__), "..", "q-vercel-latency.json"))
+        with open(data_path, "r", encoding="utf-8") as f:
+            rows = json.load(f)
 
-    data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "q-vercel-latency.json"))
-    with open(data_path, "r", encoding="utf-8") as f:
-        rows = json.load(f)
+        results = []
+        for region in regions:
+            rrows = [r for r in rows if r.get("region") == region]
+            lat = [float(r["latency_ms"]) for r in rrows]
+            up = [float(r["uptime_pct"]) for r in rrows]
+            breaches = sum(1 for x in lat if x > threshold_ms)
 
-    out = []
-    for region in regions:
-        rrows = [r for r in rows if r.get("region") == region]
-        lat = [float(r["latency_ms"]) for r in rrows]
-        up = [float(r["uptime_pct"]) for r in rrows]
+            results.append({
+                "region": region,
+                "avg_latency": mean(lat) if lat else None,
+                "p95_latency": p95(lat),
+                "avg_uptime": mean(up) if up else None,
+                "breaches": breaches,
+            })
 
-        breaches = sum(1 for x in lat if x > threshold_ms)
+        resp = {"regions": results, "threshold_ms": threshold_ms}
 
-        out.append({
-            "region": region,
-            "avg_latency": mean(lat) if lat else None,
-            "p95_latency": _p95(lat),
-            "avg_uptime": mean(up) if up else None,
-            "breaches": breaches
-        })
-
-    return {
-        "statusCode": 200,
-        "headers": {**_cors(), "Content-Type": "application/json"},
-        "body": json.dumps({"regions": out, "threshold_ms": threshold_ms}),
-    }
+        self.send_response(200)
+        self._set_cors()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp).encode("utf-8"))
